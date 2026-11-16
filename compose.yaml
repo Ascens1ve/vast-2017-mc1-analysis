@@ -1,4 +1,16 @@
 services:
+  ml:
+    build: ./ml
+    ports:
+      - "127.0.0.1:${ML_PORT:-8767}:8767"
+    volumes:
+      - ./ml/model:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8767/v1/live', timeout=5).close()"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
   postgres:
     image: postgres:17
     environment:

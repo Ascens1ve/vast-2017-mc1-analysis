@@ -9,18 +9,19 @@ PostgreSQL 17 хранит сырой журнал, очищенные собы�
 | Silver | `silver.events` | Проверенные события, порядок посещения датчиков и интервалы между ними. |
 | Silver | `silver.rejected_events` | Отклонённые записи, причины и исходные поля. |
 | Gold | `gold.trips` | Одна запись с признаками маршрута на `car_id` в каждом снимке. |
+| Gold | `gold.route_events` | Упорядоченные события маршрутов с временными метками для ML. |
 | Gold | `gold.hourly_traffic` | События и уникальные `car_id` по дате, часу, датчику и типу транспорта. |
 
 ## Первоначальная загрузка
 
 ```powershell
 Copy-Item .env.example .env
-docker compose up -d --wait
+docker compose up -d --build --wait
 python -m venv .venv
-.\.venv\bin\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 $env:DATABASE_URL = 'postgresql://vast:vast_local@127.0.0.1:5432/vast'
-.\.venv\bin\python.exe load_datalake.py seed
-.\.venv\bin\python.exe load_datalake.py process
+.\.venv\Scripts\python.exe load_datalake.py seed
+.\.venv\Scripts\python.exe load_datalake.py process
 ```
 
 При изменении пароля или порта в `.env` обновите `DATABASE_URL`. Команда `seed` записывает архив CSV и сырые записи в одной транзакции. Повторный `seed` с тем же CSV пропускает импорт.
@@ -39,7 +40,7 @@ VALUES ('2016-06-01 08:15:00', 'example-001', '1', 'entrance0');
 После записи запускайте обработку.
 
 ```powershell
-.\.venv\bin\python.exe load_datalake.py process
+.\.venv\Scripts\python.exe load_datalake.py process
 ```
 
 `process` читает накопленные события из PostgreSQL. Для каждого набора Bronze он строит новый снимок Silver и Gold одной транзакцией. Маршруты и проверка дубликатов охватывают все накопленные события. Повторный запуск с тем же содержимым Bronze переиспользует снимок, а предыдущие снимки доступны для воспроизводимых выборок.
@@ -56,3 +57,25 @@ ORDER BY car_id;
 ```
 
 Данные PostgreSQL сохраняются в именованном томе Docker. Для резервной копии всех слоёв и снимков используйте `pg_dump`.
+
+## Оценка аномальности маршрутов
+
+Цепочка обработки: Bronze → Silver → Gold → ML. `process` публикует в `gold.route_events` события каждого маршрута в порядке посещения, сохраняя время и тип автомобиля. Скрипт `score_routes.py` читает выбранный снимок Gold, собирает маршрут на каждый `car_id` и передаёт маршруты сервису V3. Модель самостоятельно вычисляет необходимые признаки, в том числе интервалы и расстояния. Версия снимка v4 добавляет эту витрину; при очередном `process` события ранее опубликованных снимков также заполняются из Silver.
+
+Сервис запускается и без файла модели. Для обучения с нуля сохраните идентификатор снимка, выведенный командой `process`, и выполните:
+
+```powershell
+.\.venv\Scripts\python.exe score_routes.py train --snapshot '<snapshot_id>'
+```
+
+Обучение создаёт `ml/model/model_v3.joblib` или заменяет существующий файл; снимок должен помещаться в один запрос сервиса. Если готовая модель уже есть, её можно поместить в этот каталог до запуска. Файл модели не хранится в Git.
+
+Сервис ML доступен на `127.0.0.1:8767` (порт задаётся `ML_PORT` в `.env`). `GET /v1/live` проверяет работу сервиса, а `GET /v1/health` показывает готовность модели в поле `ready`. До обучения `ready` равно `false`, а запрос оценки возвращает HTTP 503. После обучения можно получить оценки снимка:
+
+```powershell
+.\.venv\Scripts\python.exe score_routes.py score --snapshot '<snapshot_id>' > scores.json
+```
+
+Результат — JSON с `snapshot_id` и списком `{car_id, score}`. Чем выше `score`, тем более необычен маршрут. Маршруты отправляются партиями; `--batch-size` меняет их размер, `--ml-url` задаёт адрес сервиса. При разных типах автомобиля у одного `car_id` обработка завершается с ошибкой: модель ожидает один тип на маршрут. Под одним `car_id` объединяются все его события в снимке.
+
+Оценка отражает статистическую необычность, а не доказательство нарушения. Очистка Silver может изменить набор событий по сравнению с исходным CSV, поэтому сравнивайте оценки на одинаковых данных.

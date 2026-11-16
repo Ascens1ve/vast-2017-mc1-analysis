@@ -12,7 +12,7 @@ from transforms import SOURCE_COLUMNS, build_gold, build_silver, read_csv
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE = PROJECT_ROOT / "data" / "sensors.csv"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def ensure_schema(cursor):
@@ -95,6 +95,7 @@ def publish(database_url):
                 "silver": len(events),
                 "rejected": len(rejected),
                 "trips": len(trips),
+                "route_events": len(events),
                 "hourly_traffic": len(traffic),
             },
         }
@@ -104,6 +105,8 @@ def publish(database_url):
         )
         copy_rows(cursor, ("silver", "events"), snapshot_id, events)
         copy_rows(cursor, ("silver", "rejected_events"), snapshot_id, rejected)
+        route_events = [{key: event[key] for key in ("car_id", "visit_order", "car_type", "timestamp", "gate_name")} for event in events]
+        copy_rows(cursor, ("gold", "route_events"), snapshot_id, route_events)
         copy_rows(cursor, ("gold", "trips"), snapshot_id, trips)
         copy_rows(cursor, ("gold", "hourly_traffic"), snapshot_id, traffic)
 

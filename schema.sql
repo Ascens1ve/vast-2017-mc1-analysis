@@ -127,3 +127,17 @@ CREATE TABLE IF NOT EXISTS gold.hourly_traffic (
     "car_id_count" bigint NOT NULL,
     PRIMARY KEY (snapshot_id, date, hour, gate_name, car_type)
 );
+
+-- Ordered event sequences for the ML consumer; preserve earlier snapshots as well.
+CREATE TABLE IF NOT EXISTS gold.route_events (
+    snapshot_id text NOT NULL REFERENCES public.vast_snapshots (snapshot_id),
+    car_id text NOT NULL, visit_order integer NOT NULL,
+    car_type text NOT NULL, timestamp timestamp without time zone NOT NULL,
+    gate_name text NOT NULL,
+    PRIMARY KEY (snapshot_id, car_id, visit_order)
+);
+INSERT INTO gold.route_events (snapshot_id, car_id, visit_order, car_type, timestamp, gate_name)
+SELECT s.snapshot_id, s.car_id, s.visit_order, s.car_type, s.timestamp, s.gate_name
+FROM silver.events s
+WHERE NOT EXISTS (SELECT 1 FROM gold.route_events g WHERE g.snapshot_id = s.snapshot_id)
+ON CONFLICT DO NOTHING;
